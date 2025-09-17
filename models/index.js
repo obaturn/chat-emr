@@ -5,36 +5,52 @@ require('dotenv').config();
 // Database configuration
 const isSQLite = process.env.DB_DIALECT === 'sqlite';
 
-const sequelize = isSQLite
-  ? new Sequelize({
-      dialect: 'sqlite',
-      storage: process.env.DB_STORAGE || './database.sqlite',
-      logging: process.env.NODE_ENV === 'development' ? console.log : false,
-      define: {
-        timestamps: true,
-        underscored: true,
-      }
-    })
-  : new Sequelize({
-      dialect: 'postgres',
-      host: process.env.DB_HOST || 'localhost',
-      port: process.env.DB_PORT || 5432,
-      database: process.env.DB_NAME || 'emr_chat_db',
-      username: process.env.DB_USER || 'postgres',
-      password: process.env.DB_PASSWORD || '',
-      ssl: process.env.DB_SSL === 'true',
-      pool: {
-        max: parseInt(process.env.DB_MAX_CONNECTIONS) || 20,
-        min: 0,
-        acquire: parseInt(process.env.DB_CONNECTION_TIMEOUT) || 60000,
-        idle: parseInt(process.env.DB_IDLE_TIMEOUT) || 30000
-      },
-      logging: process.env.NODE_ENV === 'development' ? console.log : false,
-      define: {
-        timestamps: true,
-        underscored: true,
-      }
-    });
+let sequelize;
+
+if (process.env.DATABASE_URL) {
+  // Use DATABASE_URL if provided (e.g., by Railway)
+  sequelize = new Sequelize(process.env.DATABASE_URL, {
+    logging: process.env.NODE_ENV === 'development' ? console.log : false,
+    define: {
+      timestamps: true,
+      underscored: true,
+    },
+    dialectOptions: {
+      ssl: process.env.DB_SSL === 'true' || process.env.NODE_ENV === 'production', // Enable SSL in production
+    }
+  });
+} else if (isSQLite) {
+  sequelize = new Sequelize({
+    dialect: 'sqlite',
+    storage: process.env.DB_STORAGE || './database.sqlite',
+    logging: process.env.NODE_ENV === 'development' ? console.log : false,
+    define: {
+      timestamps: true,
+      underscored: true,
+    }
+  });
+} else {
+  sequelize = new Sequelize({
+    dialect: 'postgres',
+    host: process.env.DB_HOST || 'localhost',
+    port: process.env.DB_PORT || 5432,
+    database: process.env.DB_NAME || 'emr_chat_db',
+    username: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || '',
+    ssl: process.env.DB_SSL === 'true',
+    pool: {
+      max: parseInt(process.env.DB_MAX_CONNECTIONS) || 20,
+      min: 0,
+      acquire: parseInt(process.env.DB_CONNECTION_TIMEOUT) || 60000,
+      idle: parseInt(process.env.DB_IDLE_TIMEOUT) || 30000
+    },
+    logging: process.env.NODE_ENV === 'development' ? console.log : false,
+    define: {
+      timestamps: true,
+      underscored: true,
+    }
+  });
+}
 
 // Test database connection
 const testConnection = async () => {
