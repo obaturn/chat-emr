@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
+const amqp = require('amqplib');
 require('dotenv').config();
 
 // Import database models and connection
@@ -31,6 +32,9 @@ app.use(express.json());
 let onlineUsers = new Map(); // Track online users in memory
 let userSessions = new Map(); // Track user sessions in memory
 
+// RabbitMQ channel
+let rabbitChannel;
+
 // Initialize database connection and sync models
 async function initializeDatabase() {
   try {
@@ -39,6 +43,19 @@ async function initializeDatabase() {
     console.log('✅ Database initialized successfully');
   } catch (error) {
     console.error('❌ Database initialization failed:', error);
+    process.exit(1);
+  }
+}
+
+// Initialize RabbitMQ connection
+async function initializeRabbitMQ() {
+  try {
+    const connection = await amqp.connect(process.env.RABBITMQ_URL || 'amqp://localhost');
+    rabbitChannel = await connection.createChannel();
+    await rabbitChannel.assertQueue('messages', { durable: true });
+    console.log('✅ RabbitMQ initialized successfully');
+  } catch (error) {
+    console.error('❌ RabbitMQ initialization failed:', error);
     process.exit(1);
   }
 }
@@ -158,7 +175,7 @@ io.on('connection', (socket) => {
   socket.on('sendMessage', async (messageData) => {
     try {
       const { text, senderId, senderName, senderRole, timestamp, recipientId } = messageData;
-
+  
       // Create message in database
       const message = await Message.create({
         id: Date.now().toString(),
@@ -170,22 +187,24 @@ io.on('connection', (socket) => {
         timestamp: timestamp || new Date().toISOString(),
         read: false
       });
-
-      // Check if recipient is online
-      const recipientSocketId = userSessions.get(recipientId);
-      if (recipientSocketId) {
-        // Send directly to recipient
-        io.to(recipientSocketId).emit('newMessage', message.toJSON());
-
-        // Send updated unread counts to recipient
-        const recipientUnreadCounts = await getUnreadCountsForUser(recipientId);
-        io.to(recipientSocketId).emit('unreadCounts', recipientUnreadCounts);
-      }
-
+  
+      // Publish message to RabbitMQ queue for processing
+      const queueMessage = JSON.stringify({
+        id: message.id,
+        text,
+        senderId,
+        senderName,
+        senderRole,
+        recipientId,
+        timestamp: message.timestamp,
+        read: false
+      });
+      rabbitChannel.sendToQueue('messages', Buffer.from(queueMessage), { persistent: true });
+  
       // Send confirmation to sender
       socket.emit('messageSent', message.id);
-
-      console.log(`Message from ${senderName} to ${recipientId}: ${text}`);
+  
+      console.log(`Message from ${senderName} to ${recipientId}: ${text} (queued)`);
     } catch (error) {
       console.error('Error sending message:', error);
       socket.emit('error', { message: 'Failed to send message' });
@@ -376,10 +395,42 @@ async function startServer() {
     // Initialize database connection and sync models
     await initializeDatabase();
 
+    // Initialize RabbitMQ
+    await initializeRabbitMQ();
+
+    // Start message consumer
+    rabbitChannel.consume('messages', async (msg) => {
+      if (msg !== null) {
+        try {
+          const messageData = JSON.parse(msg.content.toString());
+          const { id, recipientId } = messageData;
+
+          // Check if recipient is online
+          const recipientSocketId = userSessions.get(recipientId);
+          if (recipientSocketId) {
+            // Send to recipient via Socket.IO
+            io.to(recipientSocketId).emit('newMessage', messageData);
+
+            // Send updated unread counts to recipient
+            const recipientUnreadCounts = await getUnreadCountsForUser(recipientId);
+            io.to(recipientSocketId).emit('unreadCounts', recipientUnreadCounts);
+          }
+
+          // Acknowledge message
+          rabbitChannel.ack(msg);
+        } catch (error) {
+          console.error('Error processing message from queue:', error);
+          // Reject message and requeue
+          rabbitChannel.nack(msg, false, true);
+        }
+      }
+    });
+
     server.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
       console.log(`WebSocket server ready for connections`);
       console.log(`Database: ${isSQLite ? 'SQLite' : 'PostgreSQL'}`);
+      console.log(`RabbitMQ message consumer started`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);
